@@ -16,26 +16,21 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state variables if they don't exist
-if 'driver' not in st.session_state:
-    st.session_state.driver = None
+# Initialize session state variables
 if 'results' not in st.session_state:
     st.session_state.results = []
 if 'scraping_in_progress' not in st.session_state:
     st.session_state.scraping_in_progress = False
-if 'browser_started' not in st.session_state:
-    st.session_state.browser_started = False
-if 'captcha_solved' not in st.session_state:
-    st.session_state.captcha_solved = False
-if 'results_displayed' not in st.session_state:
-    st.session_state.results_displayed = False
 
 # App title and description
 st.title("LinkedIn Contact Scraper")
 st.markdown("""
 This app scrapes LinkedIn profiles from Google search results to extract email addresses and phone numbers.
-Please use responsibly and in accordance with all applicable laws and terms of service.
+**Cloud Version** - Runs automatically without manual browser interaction.
 """)
+
+# Warning banner for Streamlit Cloud
+st.warning("⚠️ **Cloud Deployment Note**: This version runs in headless mode and may face limitations with CAPTCHA solving and rate limiting.")
 
 # Create placeholders for status and progress
 status_placeholder = st.empty()
@@ -45,242 +40,264 @@ progress_placeholder = st.empty()
 with st.sidebar:
     st.header("Search Parameters")
     keyword = st.text_input("Enter keyword to refine search:", placeholder="e.g. developer, CEO, marketing")
-    pages_to_scrape = st.slider("Number of pages to scrape:", min_value=1, max_value=10, value=3)
+    pages_to_scrape = st.slider("Number of pages to scrape:", min_value=1, max_value=5, value=2)
     email_providers = st.multiselect(
         "Email providers to search for:",
         ["@gmail.com", "@yahoo.com", "@outlook.com", "@rediffmail.com", "@hotmail.com"],
-        default=["@gmail.com", "@yahoo.com", "@outlook.com", "@rediffmail.com"]
+        default=["@gmail.com", "@yahoo.com", "@outlook.com"]
     )
     
-    # Buttons for different stages of the process
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if not st.session_state.browser_started:
-            start_browser = st.button("Start Browser", type="primary")
-        else:
-            start_scraping = st.button("Start Scraping", type="primary")
-    
-    with col2:
-        if st.session_state.browser_started:
-            close_browser = st.button("Close Browser", type="secondary")
+    # Single button to start scraping
+    start_scraping = st.button("🚀 Start Scraping", type="primary", disabled=st.session_state.scraping_in_progress)
 
-# Functions for scraping
-
-
-
-def extract_emails(text):
-    # Strict email regex
-    email_regex = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
-    emails = re.findall(email_regex, text)
-
-    # Remove LinkedIn system emails (like static.licdn.com)
-    blocked_domains = ["licdn.com", "linkedin.com", "please", "videos", "information"]
-    clean_emails = [email for email in emails if not any(domain in email for domain in blocked_domains)]
-
-    return list(set(clean_emails))  # Remove duplicates
-def extract_phones(text):
-    # Improved regex to match multiple formats
-    phone_regex = r"\+91[-\s]?\d{5}[-\s]?\d{5}|\+91\d{10}|\+91[-\s]?\d{4}[-\s]?\d{3}[-\s]?\d{3}"
-    return list(set(re.findall(phone_regex, text)))
-
-
-def setup_and_open_browser():
+def setup_headless_browser():
+    """Setup Chrome browser for cloud deployment"""
     options = Options()
-    options.add_argument("--start-maximized")
+    
+    # Essential headless options for Streamlit Cloud
+    options.add_argument("--headless=new")  # Use new headless mode
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-features=VizDisplayCompositor")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-plugins")
+    options.add_argument("--disable-images")  # Speed up by not loading images
+    options.add_argument("--disable-javascript")  # Disable JS to avoid detection
+    
+    # Anti-detection measures
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    # Critical: Keep browser open
-    options.add_experimental_option("detach", True)
-    
-    status_placeholder.info("Starting Chrome browser...")
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     try:
-        # Create a new Chrome WebDriver
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        status_placeholder.info("🔧 Setting up headless browser...")
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         
+        # Execute script to hide webdriver property
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        return driver
+    except Exception as e:
+        status_placeholder.error(f"❌ Error setting up browser: {e}")
+        return None
+
+def extract_emails(text):
+    """Extract email addresses from text"""
+    email_regex = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
+    emails = re.findall(email_regex, text)
+    
+    # Filter out unwanted domains
+    blocked_domains = ["licdn.com", "linkedin.com", "static", "cdn", "img"]
+    clean_emails = [email for email in emails 
+                   if not any(domain in email.lower() for domain in blocked_domains)]
+    
+    return list(set(clean_emails))
+
+def extract_phones(text):
+    """Extract Indian phone numbers from text"""
+    phone_patterns = [
+        r"\+91[-\s]?\d{5}[-\s]?\d{5}",  # +91 12345 67890
+        r"\+91\d{10}",                   # +9112345678901
+        r"\+91[-\s]?\d{4}[-\s]?\d{3}[-\s]?\d{3}",  # +91 1234 567 890
+        r"91[-\s]?\d{10}",               # 91 1234567890
+        r"\d{5}[-\s]?\d{5}"              # 12345 67890
+    ]
+    
+    phones = []
+    for pattern in phone_patterns:
+        phones.extend(re.findall(pattern, text))
+    
+    return list(set(phones))
+
+def perform_scraping():
+    """Main scraping function"""
+    if not keyword.strip():
+        status_placeholder.error("❌ Please enter a keyword to search for.")
+        return
+    
+    st.session_state.scraping_in_progress = True
+    all_results = []
+    
+    # Setup browser
+    driver = setup_headless_browser()
+    if not driver:
+        st.session_state.scraping_in_progress = False
+        return
+    
+    progress_bar = progress_placeholder.progress(0)
+    
+    try:
         # Build search query
         email_query = " OR ".join([f'"{provider}"' for provider in email_providers])
         search_query = f'"+91" {keyword} ({email_query}) site:linkedin.com'
         encoded_query = urllib.parse.quote_plus(search_query)
         google_url = f"https://www.google.com/search?q={encoded_query}"
         
+        status_placeholder.info(f"🔍 Searching Google for: {search_query}")
+        
         # Navigate to Google
         driver.get(google_url)
+        time.sleep(3)  # Wait for page load
         
-        st.session_state.driver = driver
-        st.session_state.browser_started = True
-        status_placeholder.success("Browser opened successfully! Solve any CAPTCHA if needed, then click 'Start Scraping'")
+        # Check if we got blocked
+        page_source = driver.page_source.lower()
+        if "captcha" in page_source or "unusual traffic" in page_source:
+            status_placeholder.error("❌ Google is requesting CAPTCHA verification. Try again later or use fewer pages.")
+            driver.quit()
+            st.session_state.scraping_in_progress = False
+            return
         
-        # Store parameters for later use
-        st.session_state.keyword = keyword
-        st.session_state.pages_to_scrape = pages_to_scrape
-        st.session_state.email_providers = email_providers
-        
-        return driver
-    except Exception as e:
-        status_placeholder.error(f"Error launching browser: {e}")
-        return None
-
-def perform_scraping():
-    if not st.session_state.driver:
-        status_placeholder.error("Browser not initialized. Please start the browser first.")
-        return
-    
-    driver = st.session_state.driver
-    all_results = []
-    st.session_state.scraping_in_progress = True
-    
-    progress_bar = progress_placeholder.progress(0)
-    
-    try:
-        # Main scraping loop
+        # Scraping loop
         current_page = 1
-        while current_page <= st.session_state.pages_to_scrape:
-            progress_bar.progress((current_page - 1) / st.session_state.pages_to_scrape)
-            status_placeholder.info(f"Scraping page {current_page} of {st.session_state.pages_to_scrape}...")
+        while current_page <= pages_to_scrape:
+            progress_bar.progress((current_page - 1) / pages_to_scrape)
+            status_placeholder.info(f"📄 Scraping page {current_page} of {pages_to_scrape}...")
             
             # Get search results
-            time.sleep(2)  # Wait for page to fully load
+            time.sleep(2)
             results = driver.find_elements(By.CSS_SELECTOR, "div.tF2Cxc")
             
             if not results:
-                status_placeholder.warning(f"No results found on page {current_page}. Moving to next page...")
+                status_placeholder.warning(f"⚠️ No results found on page {current_page}")
+                break
             
             # Process each result
-            for result in results:
+            for i, result in enumerate(results[:5]):  # Limit to 5 results per page
                 try:
-                    title = result.find_element(By.TAG_NAME, "h3").text
-                    link = result.find_element(By.TAG_NAME, "a").get_attribute("href")
+                    title_element = result.find_element(By.TAG_NAME, "h3")
+                    link_element = result.find_element(By.TAG_NAME, "a")
                     
-                    status_placeholder.info(f"Visiting: {title}")
+                    title = title_element.text
+                    link = link_element.get_attribute("href")
                     
-                    # Open LinkedIn page in new tab
-                    original_window = driver.current_window_handle
+                    if "linkedin.com" not in link:
+                        continue
+                    
+                    status_placeholder.info(f"🔍 Processing: {title[:50]}...")
+                    
+                    # Visit LinkedIn page
                     driver.execute_script("window.open(arguments[0], '_blank');", link)
-                    
-                    # Switch to the new tab
                     driver.switch_to.window(driver.window_handles[1])
-                    time.sleep(3)  # Wait for page to load
+                    
+                    time.sleep(3)  # Wait for page load
                     
                     # Extract information
                     page_source = driver.page_source
                     emails = extract_emails(page_source)
                     phones = extract_phones(page_source)
                     
-                    # Store the results
+                    # Store results
                     all_results.append({
                         "Title": title,
                         "Link": link,
-                        "Emails": ", ".join(emails) if emails else "N/A",
-                        "Phones": ", ".join(phones) if phones else "N/A",
+                        "Emails": ", ".join(emails) if emails else "No emails found",
+                        "Phones": ", ".join(phones) if phones else "No phones found",
+                        "Page": current_page
                     })
                     
-                    # Close tab and go back to search results
+                    # Close tab and return to search
                     driver.close()
-                    driver.switch_to.window(original_window)
+                    driver.switch_to.window(driver.window_handles[0])
                     
                 except Exception as e:
-                    status_placeholder.error(f"Error processing result: {str(e)}")
-                    # Make sure we return to the main window
+                    status_placeholder.warning(f"⚠️ Error processing result {i+1}: {str(e)[:100]}")
+                    # Ensure we're back on the main window
                     if len(driver.window_handles) > 1:
                         driver.close()
                         driver.switch_to.window(driver.window_handles[0])
+                    continue
             
-            # Try to navigate to next page
+            # Try to go to next page
             try:
-                next_button = driver.find_element(By.LINK_TEXT, "Next")
-                next_button.click()
+                next_button = driver.find_element(By.ID, "pnnext")
+                driver.execute_script("arguments[0].click();", next_button)
                 current_page += 1
-                time.sleep(2)  # Wait for page transition
-            except Exception as e:
-                status_placeholder.warning("No more pages available or reached the end.")
+                time.sleep(3)
+            except:
+                status_placeholder.info("📄 No more pages available")
                 break
+        
+        # Cleanup
+        driver.quit()
         
         # Update progress and status
         progress_bar.progress(1.0)
-        status_placeholder.success("✅ Scraping complete!")
+        status_placeholder.success(f"✅ Scraping complete! Found {len(all_results)} profiles.")
         
-        # Save results and update app state
+        # Save results
         st.session_state.results = all_results
         st.session_state.scraping_in_progress = False
-        st.session_state.results_displayed = True
         
-        # Display results table
+        # Display results
         if all_results:
-            st.subheader("Scraped Results")
+            st.subheader("📊 Scraped Results")
             df = pd.DataFrame(all_results)
-            st.dataframe(df)
             
-            # Download button - with unique key
+            # Summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Profiles", len(df))
+            with col2:
+                emails_found = df[df['Emails'] != 'No emails found'].shape[0]
+                st.metric("Profiles with Emails", emails_found)
+            with col3:
+                phones_found = df[df['Phones'] != 'No phones found'].shape[0]
+                st.metric("Profiles with Phones", phones_found)
+            
+            # Results table
+            st.dataframe(df, use_container_width=True)
+            
+            # Download button
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                label="Download as CSV",
+                label="📥 Download Results as CSV",
                 data=csv,
-                file_name="linkedin_contacts.csv",
-                mime="text/csv",
-                key="download_after_scraping"  # Added unique key
+                file_name=f"linkedin_contacts_{keyword}_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
             )
         else:
-            st.warning("No results found. Try adjusting your search parameters.")
+            st.warning("⚠️ No results found. Try different keywords or check if LinkedIn profiles contain the specified email providers.")
             
     except Exception as e:
-        status_placeholder.error(f"An error occurred during scraping: {str(e)}")
+        status_placeholder.error(f"❌ An error occurred: {str(e)}")
+        if driver:
+            driver.quit()
         st.session_state.scraping_in_progress = False
 
-# Handle button actions
-if 'start_browser' in locals() and start_browser:
-    setup_and_open_browser()
-    st.rerun()
-
-if 'start_scraping' in locals() and start_scraping:
+# Handle scraping button
+if start_scraping and not st.session_state.scraping_in_progress:
     perform_scraping()
 
-if 'close_browser' in locals() and close_browser:
-    if st.session_state.driver:
-        try:
-            st.session_state.driver.quit()
-            status_placeholder.info("Browser closed successfully.")
-        except:
-            status_placeholder.warning("Browser may have already closed.")
-    
-    # Reset state
-    st.session_state.driver = None
-    st.session_state.browser_started = False
-    st.session_state.scraping_in_progress = False
-    st.session_state.results_displayed = False
-    st.rerun()
-
-# Show results if they exist, scraping is not in progress, and they haven't been displayed in the scraping function
-if (not st.session_state.scraping_in_progress and 
-    st.session_state.results and 
-    not st.session_state.results_displayed):
-    
-    st.subheader("Scraped Results")
+# Show existing results if any
+if st.session_state.results and not st.session_state.scraping_in_progress:
+    st.subheader("📊 Previous Results")
     df = pd.DataFrame(st.session_state.results)
-    st.dataframe(df)
+    st.dataframe(df, use_container_width=True)
     
-    # Download button - with different unique key
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="Download as CSV",
+        label="📥 Download Previous Results",
         data=csv,
-        file_name="linkedin_contacts.csv",
+        file_name=f"linkedin_contacts_previous.csv",
         mime="text/csv",
-        key="download_from_state"  # Added different unique key
+        key="download_previous"
     )
 
-# Add helpful tips
+# Sidebar tips
 st.sidebar.markdown("---")
-st.sidebar.header("Tips")
+st.sidebar.header("💡 Tips for Cloud Version")
 st.sidebar.markdown("""
-- Use specific keywords for better results
-- If you see a CAPTCHA, solve it before clicking 'Start Scraping'
-- The browser window must stay open during scraping
-- Before closing the app, click 'Close Browser' to clean up
+- **Start small**: Use 1-2 pages initially
+- **Specific keywords**: More specific = better results  
+- **Rate limiting**: Built-in delays to avoid blocking
+- **No CAPTCHA solving**: If blocked, try again later
+- **Headless mode**: Runs without browser window
 """)
 
 # Footer
 st.markdown("---")
-st.caption("⚠️ Note: Please use this tool ethically and respect privacy and terms of service.")
+st.caption("⚠️ **Disclaimer**: Use responsibly and respect privacy laws and LinkedIn's Terms of Service. This tool is for educational purposes.")
