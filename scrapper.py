@@ -54,8 +54,8 @@ def setup_headless_browser():
     """Setup Chrome browser for cloud deployment"""
     options = Options()
     
-    # Essential headless options for Streamlit Cloud
-    options.add_argument("--headless=new")  # Use new headless mode
+    # Classic headless mode for maximum compatibility
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -64,9 +64,11 @@ def setup_headless_browser():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-plugins")
-    options.add_argument("--disable-images")  # Speed up by not loading images
-    options.add_argument("--disable-javascript")  # Disable JS to avoid detection
-    
+    options.add_argument("--disable-images")  # Optional: speeds up loads, but might break some layouts
+    # **REMOVED** options.add_argument("--disable-javascript")  # DO NOT disable JS or LinkedIn breaks
+
+    options.binary_location = "/usr/bin/chromium-browser"
+
     # Anti-detection measures
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -77,7 +79,7 @@ def setup_headless_browser():
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         
-        # Execute script to hide webdriver property
+        # Hide webdriver flag for anti-bot evasion
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         return driver
@@ -133,7 +135,7 @@ def perform_scraping():
     try:
         # Build search query
         email_query = " OR ".join([f'"{provider}"' for provider in email_providers])
-        search_query = f'"+91" {keyword} ({email_query}) site:linkedin.com'
+        search_query = f'"+91" & {keyword} ({email_query}) site:linkedin.com'
         encoded_query = urllib.parse.quote_plus(search_query)
         google_url = f"https://www.google.com/search?q={encoded_query}"
         
