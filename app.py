@@ -32,7 +32,7 @@ if 'failed_pages' not in st.session_state:
 st.title("LinkedIn Contact Scraper - Actually Working Edition 🎯")
 st.markdown("""
 **Fixed version** that actually finds contact info instead of collecting digital tumbleweeds.
-**What's new**: Smarter filtering, better queries, actual results.
+**What's new**: Smarter filtering, better queries, actual results, email provider filtering, pagination support.
 """)
 
 # Status and progress placeholders
@@ -47,6 +47,13 @@ with st.sidebar:
     location = st.text_input("Location (optional):", placeholder="e.g. Mumbai, India")
     pages_to_scrape = st.slider("Pages to scrape:", min_value=1, max_value=3, value=1)
     
+    # Email provider filter - NEW addition like scrapper.py
+    email_providers = st.multiselect(
+        "Email providers to search for:",
+        ["@gmail.com", "@yahoo.com", "@outlook.com", "@rediffmail.com", "@hotmail.com"],
+        default=["@gmail.com", "@yahoo.com", "@outlook.com", "@rediffmail.com"]
+    )
+    
     # Search engine selection
     search_engine = st.selectbox("Search Engine:", ["DuckDuckGo", "Bing", "Google"], index=0)
     
@@ -55,7 +62,7 @@ with st.sidebar:
         delay_between_requests = st.slider("Delay between requests (seconds):", 3, 15, 6)
         enable_debug = st.checkbox("Enable debug mode", value=True)
         save_failed_pages = st.checkbox("Save failed pages for inspection", value=True)
-        max_profiles_per_page = st.slider("Max profiles per page:", 3, 10, 5)
+        max_profiles_per_page = st.slider("Max profiles per page:", 3, 50, 20)  # Increased default
     
     start_scraping = st.button("🚀 Start Scraping", type="primary", 
                               disabled=st.session_state.scraping_in_progress)
@@ -94,8 +101,8 @@ def is_valid_linkedin_profile_url(url):
         
     return True
 
-def extract_emails_aggressively(text):
-    """Extract emails with multiple patterns and better filtering"""
+def extract_emails_aggressively(text, email_providers):
+    """Extract emails with multiple patterns and provider filtering"""
     patterns = [
         r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
         r"[A-Za-z0-9._%+-]+\s*@\s*[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
@@ -115,12 +122,12 @@ def extract_emails_aggressively(text):
         email = email.replace("[at]", "@").replace(" ", "")
         cleaned_emails.append(email)
     
-    # Filter out garbage
+    # Filter out garbage domains
     blocked_domains = [
         "licdn.com", "linkedin.com", "static", "cdn", "img", "facebook.com",
         "twitter.com", "instagram.com", "youtube.com", "example.com", "test.com",
         "localhost", "127.0.0.1", "noreply", "no-reply", "donotreply", "sentry.io",
-        "gravatar.com", "googleusercontent.com", "amazonaws.com"
+        "gravatar.com", "googleusercontent.com", "amazonaws.com", "static.licdn.com"
     ]
     
     valid_emails = []
@@ -146,6 +153,11 @@ def extract_emails_aggressively(text):
         local_part = email.split('@')[0]
         if not re.search(r'[a-zA-Z]', local_part):
             continue
+        
+        # Filter by selected email providers (like scrapper.py)
+        if email_providers:
+            if not any(provider in email_lower for provider in email_providers):
+                continue
             
         valid_emails.append(email)
     
@@ -200,35 +212,55 @@ def extract_phones_aggressively(text):
     
     return filtered_phones
 
-def build_smart_search_query(keyword, location, search_engine):
-    """Build queries that GUARANTEE LinkedIn profiles with Indian contact info"""
-    # FIXED: Always explicitly include LinkedIn in the query
+def build_smart_search_query(keyword, location, search_engine, email_providers):
+    """Build queries that GUARANTEE LinkedIn profiles with Indian contact info and specific email providers"""
     if location:
         location_part = f' "{location}"'
     else:
         location_part = ""
     
+    # Build provider clause like scrapper.py
+    provider_clause = " OR ".join([f'"{p}"' for p in email_providers]) if email_providers else ""
+    
     # Different approaches per engine - but ALL include LinkedIn explicitly
     if search_engine == "DuckDuckGo":
-        # More explicit LinkedIn targeting with Indian phone patterns
-        return f'site:linkedin.com/in/ "{keyword}"{location_part} (email OR contact OR @ OR +91 OR "91")'
+        base_query = f'site:linkedin.com/in/ "{keyword}"{location_part} (email OR contact OR @ OR +91 OR "91"'
+        if provider_clause:
+            base_query += f' OR {provider_clause}'
+        base_query += ')'
+        return base_query
     elif search_engine == "Bing":
-        # Bing works well with explicit site search
-        return f'site:linkedin.com/in/ {keyword}{location_part} (contact OR +91)'
+        base_query = f'site:linkedin.com/in/ {keyword}{location_part} (contact OR +91'
+        if provider_clause:
+            base_query += f' OR {provider_clause}'
+        base_query += ')'
+        return base_query
     else:  # Google
-        # Google - keep it focused on LinkedIn profiles with contact hints
-        return f'site:linkedin.com/in/ {keyword}{location_part} (+91 OR email OR contact)'
+        base_query = f'site:linkedin.com/in/ {keyword}{location_part} (+91 OR email OR contact'
+        if provider_clause:
+            base_query += f' OR {provider_clause}'
+        base_query += ')'
+        return base_query
 
-def get_search_url(query, search_engine):
-    """Get search URL with proper encoding"""
+def get_search_url(query, search_engine, page_no=0):
+    """Get search URL with proper encoding and pagination"""
     encoded_query = urllib.parse.quote_plus(query)
     
     if search_engine == "Google":
-        return f"https://www.google.com/search?q={encoded_query}&num=50"
+        base_url = f"https://www.google.com/search?q={encoded_query}&num=50"
+        if page_no > 0:
+            base_url += f"&start={page_no * 50}"
+        return base_url
     elif search_engine == "Bing":
-        return f"https://www.bing.com/search?q={encoded_query}&count=50"
+        base_url = f"https://www.bing.com/search?q={encoded_query}&count=50"
+        if page_no > 0:
+            base_url += f"&first={page_no * 50}"
+        return base_url
     else:  # DuckDuckGo
-        return f"https://duckduckgo.com/?q={encoded_query}&kl=wt-wt&ia=web"
+        base_url = f"https://duckduckgo.com/?q={encoded_query}&kl=wt-wt&ia=web"
+        if page_no > 0:
+            base_url += f"&s={page_no * 50}"
+        return base_url
 
 def get_selectors(search_engine):
     """CSS selectors for each engine"""
@@ -319,15 +351,15 @@ async def scrape_profile_content(page, profile_url):
     except Exception as e:
         return f"Error loading profile: {str(e)}"
 
-async def try_multiple_search_engines(keyword, location):
-    """Try multiple search engines to find LinkedIn profiles"""
+async def try_multiple_search_engines(keyword, location, email_providers, pages_to_scrape):
+    """Try multiple search engines to find LinkedIn profiles with pagination"""
     engines = ["DuckDuckGo", "Google", "Bing"]
     all_profiles = []
     
     for engine in engines:
         try:
             status_placeholder.info(f"🔍 Trying {engine}...")
-            profiles = await search_with_engine(keyword, location, engine)
+            profiles = await search_with_engine(keyword, location, engine, email_providers, pages_to_scrape)
             
             if profiles:
                 status_placeholder.success(f"✅ Found {len(profiles)} profiles on {engine}")
@@ -350,74 +382,95 @@ async def try_multiple_search_engines(keyword, location):
     
     return unique_profiles
 
-async def search_with_engine(keyword, location, engine):
-    """Search with a specific engine"""
+async def search_with_engine(keyword, location, engine, email_providers, pages_to_scrape):
+    """Search with a specific engine with pagination support like scrapper.py"""
     playwright, browser, context, page = await setup_browser()
     if not browser:
         return []
     
     try:
-        search_query = build_smart_search_query(keyword, location, engine)
-        search_url = get_search_url(search_query, engine)
+        search_query = build_smart_search_query(keyword, location, engine, email_providers)
         selectors = get_selectors(engine)
         
         if enable_debug:
             debug_placeholder.info(f"🔍 Query: {search_query}")
-            debug_placeholder.info(f"🌐 URL: {search_url}")
         
-        # Navigate to search
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(random.randint(4000, 8000))
+        all_profiles = []
         
-        # Check for blocking
-        content = await page.content()
-        if any(term in content.lower() for term in ["captcha", "unusual traffic", "blocked", "verify you are human"]):
-            raise Exception(f"{engine} blocked the request")
-        
-        # Find search results
-        try:
-            await page.wait_for_selector(selectors["result"], timeout=15000)
-        except:
-            if save_failed_pages:
-                with open(f"/tmp/search_fail_{engine}_{int(time.time())}.html", "w") as f:
-                    f.write(await page.content())
-            raise Exception("No search results selector found")
-        
-        # Get results
-        results = await page.query_selector_all(selectors["result"])
-        
-        if not results:
-            raise Exception("No search results found")
-        
-        valid_profiles = []
-        
-        # Filter for valid LinkedIn profiles
-        for i, result in enumerate(results):
+        # Loop through pages like scrapper.py
+        for page_no in range(pages_to_scrape):
             try:
-                title_elem = await result.query_selector(selectors["title"])
-                link_elem = await result.query_selector(selectors["link"])
+                search_url = get_search_url(search_query, engine, page_no)
                 
-                if not title_elem or not link_elem:
+                if enable_debug:
+                    debug_placeholder.info(f"🌐 Page {page_no + 1} URL: {search_url}")
+                
+                # Navigate to search
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(random.randint(4000, 8000))
+                
+                # Check for blocking
+                content = await page.content()
+                if any(term in content.lower() for term in ["captcha", "unusual traffic", "blocked", "verify you are human"]):
+                    raise Exception(f"{engine} blocked the request on page {page_no + 1}")
+                
+                # Find search results
+                try:
+                    await page.wait_for_selector(selectors["result"], timeout=15000)
+                except:
+                    if save_failed_pages:
+                        with open(f"/tmp/search_fail_{engine}_page_{page_no}_{int(time.time())}.html", "w") as f:
+                            f.write(await page.content())
+                    status_placeholder.warning(f"⚠️ No results found on page {page_no + 1}")
                     continue
                 
-                title = await title_elem.inner_text()
-                link = await link_elem.get_attribute("href")
+                # Get results
+                results = await page.query_selector_all(selectors["result"])
                 
-                # Fix relative URLs
-                if link and link.startswith('/url?'):
-                    # Google redirect URL
-                    match = re.search(r'url=([^&]+)', link)
-                    if match:
-                        link = urllib.parse.unquote(match.group(1))
+                if not results:
+                    status_placeholder.warning(f"⚠️ No search results found on page {page_no + 1}")
+                    continue
                 
-                # Strict filtering
-                if is_valid_linkedin_profile_url(link):
-                    valid_profiles.append({"title": title, "url": link, "engine": engine})
+                page_profiles = []
+                
+                # Filter for valid LinkedIn profiles
+                for i, result in enumerate(results):
+                    try:
+                        title_elem = await result.query_selector(selectors["title"])
+                        link_elem = await result.query_selector(selectors["link"])
+                        
+                        if not title_elem or not link_elem:
+                            continue
+                        
+                        title = await title_elem.inner_text()
+                        link = await link_elem.get_attribute("href")
+                        
+                        # Fix relative URLs
+                        if link and link.startswith('/url?'):
+                            # Google redirect URL
+                            match = re.search(r'url=([^&]+)', link)
+                            if match:
+                                link = urllib.parse.unquote(match.group(1))
+                        
+                        # Strict filtering
+                        if is_valid_linkedin_profile_url(link):
+                            page_profiles.append({"title": title, "url": link, "engine": engine, "page": page_no + 1})
+                            
+                    except Exception as e:
+                        continue
+                
+                all_profiles.extend(page_profiles)
+                status_placeholder.info(f"📄 Page {page_no + 1}: Found {len(page_profiles)} valid profiles")
+                
+                # Add delay between pages
+                if page_no < pages_to_scrape - 1:
+                    await page.wait_for_timeout(random.randint(3000, 6000))
                     
             except Exception as e:
+                status_placeholder.warning(f"❌ Error on page {page_no + 1}: {str(e)}")
                 continue
         
-        return valid_profiles
+        return all_profiles
         
     finally:
         try:
@@ -427,7 +480,7 @@ async def search_with_engine(keyword, location, engine):
             pass
 
 async def scrape_search_results():
-    """Main scraping function that actually works"""
+    """Main scraping function that actually works with pagination and email filtering"""
     if not keyword.strip():
         status_placeholder.error("❌ Please enter a keyword.")
         return
@@ -439,15 +492,15 @@ async def scrape_search_results():
     all_results = []
     
     try:
-        # Try multiple search engines
+        # Try multiple search engines with pagination
         status_placeholder.info("🔍 Searching for LinkedIn profiles...")
-        valid_profiles = await try_multiple_search_engines(keyword, location)
+        valid_profiles = await try_multiple_search_engines(keyword, location, email_providers, pages_to_scrape)
         
         if not valid_profiles:
             status_placeholder.error("❌ No LinkedIn profiles found across all search engines. Try different keywords.")
             return
         
-        status_placeholder.success(f"✅ Found {len(valid_profiles)} valid LinkedIn profiles")
+        status_placeholder.success(f"✅ Found {len(valid_profiles)} valid LinkedIn profiles across {pages_to_scrape} pages")
         
         # Setup browser for profile scraping
         playwright, browser, context, page = await setup_browser()
@@ -455,10 +508,12 @@ async def scrape_search_results():
             return
         
         try:
-            # Process profiles
-            for i, profile in enumerate(valid_profiles[:max_profiles_per_page]):
+            # Process profiles (limit to max_profiles_per_page or all if set high)
+            profiles_to_process = valid_profiles[:max_profiles_per_page] if max_profiles_per_page < len(valid_profiles) else valid_profiles
+            
+            for i, profile in enumerate(profiles_to_process):
                 try:
-                    status_placeholder.info(f"🔍 Processing profile {i+1}/{len(valid_profiles[:max_profiles_per_page])}: {profile['title'][:50]}...")
+                    status_placeholder.info(f"🔍 Processing profile {i+1}/{len(profiles_to_process)}: {profile['title'][:50]}...")
                     
                     # Create new page for profile
                     profile_page = await context.new_page()
@@ -467,8 +522,8 @@ async def scrape_search_results():
                         # Scrape profile content
                         content = await scrape_profile_content(profile_page, profile['url'])
                         
-                        # Extract contact info
-                        emails = extract_emails_aggressively(content)
+                        # Extract contact info with email provider filtering
+                        emails = extract_emails_aggressively(content, email_providers)
                         phones = extract_phones_aggressively(content)
                         
                         # Always add profile, even without contact info for debugging
@@ -480,6 +535,7 @@ async def scrape_search_results():
                             "Email_Count": len(emails),
                             "Phone_Count": len(phones),
                             "Search_Engine": profile.get('engine', search_engine),
+                            "Page_Number": profile.get('page', 1),
                             "Scraped_At": time.strftime('%Y-%m-%d %H:%M:%S')
                         }
                         all_results.append(result_data)
@@ -504,7 +560,7 @@ async def scrape_search_results():
                                                              (delay_between_requests + 3) * 1000))
                     
                     # Update progress
-                    progress_bar.progress((i + 1) / len(valid_profiles[:max_profiles_per_page]))
+                    progress_bar.progress((i + 1) / len(profiles_to_process))
                     
                 except Exception as e:
                     status_placeholder.warning(f"⚠️ Error processing profile {i+1}: {str(e)}")
@@ -579,7 +635,8 @@ def display_results():
         label="📥 Download Results as CSV",
         data=csv,
         file_name=filename,
-        mime="text/csv"
+        mime="text/csv",
+        key="download_results"
     )
 
 def display_debug_info():
@@ -621,9 +678,11 @@ st.sidebar.markdown("---")
 st.sidebar.header("✅ What's Fixed")
 st.sidebar.markdown("""
 - **GUARANTEED LinkedIn**: Always includes site:linkedin.com/in/
+- **Email Provider Filtering**: Like scrapper.py - filter by specific domains
+- **Pagination Support**: Scrapes multiple pages like the old scrapper
 - **Multi-engine fallback**: Tries DuckDuckGo → Google → Bing
 - **Better URL handling**: Fixes Google redirects
-- **Explicit queries**: Forces LinkedIn profile results
+- **Explicit queries**: Forces LinkedIn profile results with email providers
 - **Debug visibility**: See exact queries used
 - **All profiles shown**: Even without contact info
 """)
@@ -632,10 +691,12 @@ st.sidebar.markdown("---")
 st.sidebar.header("🎯 Pro Tips")
 st.sidebar.markdown("""
 1. **Use specific titles** - "Software Engineer" not just "developer"
-2. **Include company** - "engineer Microsoft" works better
-3. **Try different keywords** if no results
-4. **Check debug info** to see actual queries
-5. **Enable all profiles** to see what's found
+2. **Select email providers** - Choose the domains you want to target
+3. **Increase pages** - More pages = more profiles (but slower)
+4. **Include company** - "engineer Microsoft" works better
+5. **Try different keywords** if no results
+6. **Check debug info** to see actual queries
+7. **Enable all profiles** to see what's found
 """)
 
 st.markdown("---")
